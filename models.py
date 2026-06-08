@@ -57,3 +57,11 @@ class ChatHistory(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     microservice = relationship("Microservice", back_populates="chat_histories")
+
+class User(Base):
+    __tablename__ = "users"
+    
+    id = Column(String, primary_key=True) # Firebase UID
+    email = Column(String)
+    display_name = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)

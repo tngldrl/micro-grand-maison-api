@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -8,6 +8,7 @@ import json
 
 from database import engine, Base, get_db
 import models
+from auth import verify_token
 
 # Create tables
 Base.metadata.create_all(bind=engine)
@@ -105,7 +106,12 @@ async def run_analysis_task(project_id: str, repo_paths: list[str]):
         db.close()
 
 @app.post("/api/projects/analyze")
-async def start_analysis(req: AnalyzeRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+async def start_analysis(
+    req: AnalyzeRequest, 
+    background_tasks: BackgroundTasks, 
+    db: Session = Depends(get_db),
+    user: dict = Depends(verify_token)
+):
     paths = [p.strip() for p in req.repo_paths.split(",") if p.strip()]
     if not paths:
         raise HTTPException(status_code=400, detail="No paths provided")
@@ -123,7 +129,11 @@ async def start_analysis(req: AnalyzeRequest, background_tasks: BackgroundTasks,
     return {"project_id": project.id, "status": project.status}
 
 @app.get("/api/projects/{project_id}")
-def get_project(project_id: str, db: Session = Depends(get_db)):
+def get_project(
+    project_id: str, 
+    db: Session = Depends(get_db),
+    user: dict = Depends(verify_token)
+):
     project = db.query(models.Project).filter(models.Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -164,7 +174,11 @@ class ChatMessage(BaseModel):
     message: str
 
 @app.get("/api/microservices/{ms_id}/chat")
-def get_chat_history(ms_id: str, db: Session = Depends(get_db)):
+def get_chat_history(
+    ms_id: str, 
+    db: Session = Depends(get_db),
+    user: dict = Depends(verify_token)
+):
     ms = db.query(models.Microservice).filter(models.Microservice.id == ms_id).first()
     if not ms:
         raise HTTPException(status_code=404, detail="Microservice not found")
@@ -174,7 +188,12 @@ def get_chat_history(ms_id: str, db: Session = Depends(get_db)):
     return {"messages": messages}
 
 @app.post("/api/microservices/{ms_id}/chat")
-async def send_chat_message(ms_id: str, req: ChatMessage, db: Session = Depends(get_db)):
+async def send_chat_message(
+    ms_id: str, 
+    req: ChatMessage, 
+    db: Session = Depends(get_db),
+    user: dict = Depends(verify_token)
+):
     ms = db.query(models.Microservice).filter(models.Microservice.id == ms_id).first()
     if not ms:
         raise HTTPException(status_code=404, detail="Microservice not found")
@@ -210,6 +229,44 @@ async def send_chat_message(ms_id: str, req: ChatMessage, db: Session = Depends(
     db.commit()
     
     return {"reply": reply, "messages": history}
+
+@app.post("/api/webhooks/github")
+async def github_webhook(request: Request, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    # This endpoint receives GitHub push events
+    # In a real app, we would verify the X-Hub-Signature here
+    payload = await request.json()
+    
+    # We only care about push events
+    if "commits" not in payload:
+        return {"status": "ignored", "reason": "not a push event"}
+        
+    repo_url = payload.get("repository", {}).get("clone_url")
+    if not repo_url:
+        return {"status": "ignored", "reason": "no repository url"}
+        
+    # Find a project that has this repo in its paths
+    # For MVP, we just find any project that contains the repo name
+    repo_name = payload.get("repository", {}).get("name", "")
+    
+    projects = db.query(models.Project).all()
+    target_project = None
+    for p in projects:
+        if repo_name in p.repo_paths:
+            target_project = p
+            break
+            
+    if not target_project:
+        return {"status": "ignored", "reason": "project not found"}
+        
+    # Update status to analyzing
+    target_project.status = "analyzing"
+    db.commit()
+    
+    # Trigger re-analysis
+    paths = [p.strip() for p in target_project.repo_paths.split(",") if p.strip()]
+    background_tasks.add_task(run_analysis_task, target_project.id, paths)
+    
+    return {"status": "re-analyzing", "project_id": target_project.id}
 
 if __name__ == "__main__":
     import uvicorn
