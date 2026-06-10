@@ -12,18 +12,30 @@ class Project(Base):
     __tablename__ = "projects"
 
     id = Column(String, primary_key=True, default=generate_uuid)
-    repo_paths = Column(String) # Comma separated list of paths
     status = Column(String, default="analyzing") # analyzing, ready, error
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    repositories = relationship("Repository", back_populates="project", cascade="all, delete-orphan")
     microservices = relationship("Microservice", back_populates="project", cascade="all, delete-orphan")
     dependencies = relationship("Dependency", back_populates="project", cascade="all, delete-orphan")
+
+class Repository(Base):
+    __tablename__ = "repositories"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    project_id = Column(String, ForeignKey("projects.id"))
+    url = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    project = relationship("Project", back_populates="repositories")
+    microservices = relationship("Microservice", back_populates="repository")
 
 class Microservice(Base):
     __tablename__ = "microservices"
 
     id = Column(String, primary_key=True, default=generate_uuid)
     project_id = Column(String, ForeignKey("projects.id"))
+    repository_id = Column(String, ForeignKey("repositories.id"), nullable=True)
     ms_id = Column(String) # The id returned from MCP (e.g. frontend-web)
     name = Column(String)
     description = Column(String)
@@ -34,6 +46,7 @@ class Microservice(Base):
     position_y = Column(Float, default=0.0)
 
     project = relationship("Project", back_populates="microservices")
+    repository = relationship("Repository", back_populates="microservices")
     chat_histories = relationship("ChatHistory", back_populates="microservice", cascade="all, delete-orphan")
 
 class Dependency(Base):
