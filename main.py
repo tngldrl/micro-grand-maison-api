@@ -5,6 +5,7 @@ from pydantic import BaseModel
 import httpx
 import os
 import json
+from typing import Optional
 
 from database import engine, Base, get_db
 import models
@@ -28,6 +29,7 @@ API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:8000")
 
 class AnalyzeRequest(BaseModel):
     repo_urls: list[str]
+    project_name: Optional[str] = None
 
 async def run_analysis_task(project_id: str, repo_urls: list[str]):
     callback_url = f"{API_BASE_URL}/api/projects/{project_id}/callback"
@@ -164,7 +166,9 @@ async def start_analysis(
         raise HTTPException(status_code=400, detail="No URLs provided")
         
     project = models.Project(
-        status="analyzing"
+        status="analyzing",
+        name=req.project_name,
+        user_id=user["uid"]
     )
     db.add(project)
     db.commit()
@@ -183,6 +187,25 @@ async def start_analysis(
     
     return {"project_id": project.id, "status": project.status}
 
+@app.get("/api/projects")
+def list_projects(
+    db: Session = Depends(get_db),
+    user: dict = Depends(verify_token)
+):
+    projects = db.query(models.Project).filter(
+        models.Project.user_id == user["uid"]
+    ).order_by(models.Project.created_at.desc()).all()
+    
+    return [
+        {
+            "id": proj.id,
+            "name": proj.name,
+            "status": proj.status,
+            "created_at": proj.created_at.isoformat() if proj.created_at else None
+        }
+        for proj in projects
+    ]
+
 @app.get("/api/projects/{project_id}")
 def get_project(
     project_id: str, 
@@ -194,7 +217,7 @@ def get_project(
         raise HTTPException(status_code=404, detail="Project not found")
         
     if project.status != "ready":
-        return {"id": project.id, "status": project.status}
+        return {"id": project.id, "name": project.name, "status": project.status}
         
     repositories = [
         {
@@ -229,6 +252,7 @@ def get_project(
     
     return {
         "id": project.id,
+        "name": project.name,
         "status": project.status,
         "repositories": repositories,
         "microservices": microservices,

@@ -12,9 +12,12 @@ class Project(Base):
     __tablename__ = "projects"
 
     id = Column(String, primary_key=True, default=generate_uuid)
+    user_id = Column(String, ForeignKey("users.id"), nullable=True)
+    name = Column(String, nullable=True)
     status = Column(String, default="analyzing") # analyzing, ready, error
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    user = relationship("User", back_populates="projects")
     repositories = relationship("Repository", back_populates="project", cascade="all, delete-orphan")
     microservices = relationship("Microservice", back_populates="project", cascade="all, delete-orphan")
     dependencies = relationship("Dependency", back_populates="project", cascade="all, delete-orphan")
@@ -78,3 +81,5 @@ class User(Base):
     email = Column(String)
     display_name = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    projects = relationship("Project", back_populates="user", cascade="all, delete-orphan")
