@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Float, ForeignKey, DateTime
+from sqlalchemy import Column, String, Float, ForeignKey, DateTime, Integer
 from sqlalchemy.orm import relationship
 import uuid
 from datetime import datetime
@@ -47,6 +47,7 @@ class Microservice(Base):
     avatar_image_url = Column(String)
     position_x = Column(Float, default=0.0)
     position_y = Column(Float, default=0.0)
+    scale_tier = Column(Integer, default=3, nullable=False)
 
     project = relationship("Project", back_populates="microservices")
     repository = relationship("Repository", back_populates="microservices")
