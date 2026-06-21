@@ -57,29 +57,35 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def find_repository_by_url(db: Session, url: str, project_id: Optional[str] = None) -> Optional[models.Repository]:
+def find_all_repositories_by_url(db: Session, url: str, project_id: Optional[str] = None) -> List[models.Repository]:
     """
-    Finds a Repository in the database matching a given URL by comparing their normalized
+    Finds all Repository records in the database matching a given URL by comparing their normalized
     (owner, repo) pairs, ignoring casing and the '.git' suffix.
     """
     try:
         target_owner, target_repo = parse_github_repo_url(url)
     except ValueError:
-        return None
+        return []
 
     query = db.query(models.Repository)
     if project_id:
         query = query.filter(models.Repository.project_id == project_id)
 
     all_repos = query.all()
+    matched_repos = []
     for repo in all_repos:
         try:
             owner, name = parse_github_repo_url(repo.url)
             if owner.lower() == target_owner.lower() and name.lower() == target_repo.lower():
-                return repo
+                matched_repos.append(repo)
         except ValueError:
             continue
-    return None
+    return matched_repos
+
+def find_repository_by_url(db: Session, url: str, project_id: Optional[str] = None) -> Optional[models.Repository]:
+    repos = find_all_repositories_by_url(db, url, project_id)
+    return repos[0] if repos else None
+
 
 MCP_URL = os.environ.get("MCP_URL", "http://localhost:8001")
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:8000")
@@ -827,31 +833,32 @@ async def github_webhook(
     if not repo_url:
         return {"status": "ignored", "reason": "no repository url"}
 
-    db_repo = find_repository_by_url(db, repo_url)
-    if not db_repo:
+    db_repos = find_all_repositories_by_url(db, repo_url)
+    if not db_repos:
         return {"status": "ignored", "reason": "project not found"}
 
-    target_project = db_repo.project
-    if not target_project:
+    reanalyzed_projects = []
+    for db_repo in db_repos:
+        target_project = db_repo.project
+        if not target_project:
+            continue
+
+        target_project.status = "analyzing"
+        db.commit()
+
+        urls = [r.url for r in target_project.repositories]
+        background_tasks.add_task(
+            run_analysis_task,
+            target_project.id,
+            urls,
+            target_project.github_installation_id,
+        )
+        reanalyzed_projects.append(target_project.id)
+
+    if reanalyzed_projects:
+        return {"status": "re-analyzing", "project_ids": reanalyzed_projects}
+    else:
         return {"status": "ignored", "reason": "project not found"}
-
-    target_project.status = "analyzing"
-    db.commit()
-
-    urls = [r.url for r in target_project.repositories]
-    background_tasks.add_task(
-        run_analysis_task,
-        target_project.id,
-        urls,
-        target_project.github_installation_id,
-    )
-
-    return {"status": "re-analyzing", "project_id": target_project.id}
-
-@app.get("/api/debug-repositories")
-def debug_repositories(db: Session = Depends(get_db)):
-    repos = db.query(models.Repository).all()
-    return [{"id": r.id, "url": r.url, "webhook_enabled": r.webhook_enabled, "watch_branch": r.watch_branch, "project_id": r.project_id} for r in repos]
 
 
 @app.post("/api/webhooks/github-app")
@@ -918,50 +925,60 @@ async def github_app_webhook(
             logger.warning("Push event ignored: repo_url is empty")
             return {"status": "ignored", "reason": "no repository url"}
 
-        db_repo = find_repository_by_url(db, repo_url)
-        if not db_repo:
+        db_repos = find_all_repositories_by_url(db, repo_url)
+        if not db_repos:
             logger.warning("Push event ignored: no tracked repository found in DB for URL '%s'", repo_url)
             return {"status": "ignored", "reason": "repository not tracked"}
 
-        target_project = db_repo.project
-        if not target_project:
-            logger.warning("Push event ignored: project not found for repository ID %s", db_repo.id)
-            return {"status": "ignored", "reason": "project not found"}
+        updated_projects = []
+        ignored_reasons = []
 
-        # Update installation_id if we now have it from the push event
-        if installation_id and not target_project.github_installation_id:
-            target_project.github_installation_id = installation_id
+        for db_repo in db_repos:
+            target_project = db_repo.project
+            if not target_project:
+                logger.warning("Push event ignored: project not found for repository ID %s", db_repo.id)
+                continue
 
-        # Branch filtering: only act if webhook is enabled and branch matches
-        matched = (
-            db_repo.webhook_enabled
-            and bool(db_repo.watch_branch)
-            and pushed_branch == db_repo.watch_branch
-        )
+            # Update installation_id if we now have it from the push event
+            if installation_id and not target_project.github_installation_id:
+                target_project.github_installation_id = installation_id
 
-        # Always record the delivery for audit/news-feed purposes
-        delivery = models.WebhookDelivery(
-            repository_id=db_repo.id,
-            project_id=target_project.id,
-            branch=pushed_branch or "unknown",
-            commit_sha=commit_sha,
-            matched=matched,
-        )
-        db.add(delivery)
-
-        if matched:
-            target_project.has_update = True
-            db.commit()
-            logger.info(
-                "push matched watch_branch '%s' for project %s – has_update set to True",
-                pushed_branch, target_project.id,
+            # Branch filtering: only act if webhook is enabled and branch matches
+            matched = (
+                db_repo.webhook_enabled
+                and bool(db_repo.watch_branch)
+                and pushed_branch == db_repo.watch_branch
             )
-            return {"status": "update_flagged", "project_id": target_project.id}
+
+            # Always record the delivery for audit/news-feed purposes
+            delivery = models.WebhookDelivery(
+                repository_id=db_repo.id,
+                project_id=target_project.id,
+                branch=pushed_branch or "unknown",
+                commit_sha=commit_sha,
+                matched=matched,
+            )
+            db.add(delivery)
+
+            if matched:
+                target_project.has_update = True
+                updated_projects.append(target_project.id)
+                logger.info(
+                    "push matched watch_branch '%s' for project %s – has_update set to True",
+                    pushed_branch, target_project.id,
+                )
+            else:
+                reason = "webhook_disabled" if not db_repo.webhook_enabled else f"branch '{pushed_branch}' != watch_branch '{db_repo.watch_branch}'"
+                ignored_reasons.append(f"project {target_project.id}: {reason}")
+
+        db.commit()
+
+        if updated_projects:
+            return {"status": "update_flagged", "project_ids": updated_projects}
         else:
-            db.commit()
-            reason = "webhook_disabled" if not db_repo.webhook_enabled else f"branch '{pushed_branch}' != watch_branch '{db_repo.watch_branch}'"
-            logger.info("push ignored for project %s: %s", target_project.id, reason)
-            return {"status": "ignored", "reason": reason}
+            reason_summary = "; ".join(ignored_reasons)
+            logger.info("push ignored: %s", reason_summary)
+            return {"status": "ignored", "reason": reason_summary}
 
     return {"status": "ignored", "event": event_type}
 
