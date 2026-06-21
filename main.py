@@ -859,6 +859,16 @@ async def github_webhook(
         return {"status": "re-analyzing", "project_ids": reanalyzed_projects}
     else:
         return {"status": "ignored", "reason": "project not found"}
+@app.get("/api/debug-project-microservices/{project_id}")
+def debug_project_microservices(project_id: str, db: Session = Depends(get_db)):
+    ms_list = db.query(models.Microservice).filter(models.Microservice.project_id == project_id).all()
+    return [{
+        "id": m.id,
+        "ms_id": m.ms_id,
+        "name": m.name,
+        "description": m.description,
+        "key_files": m.key_files
+    } for m in ms_list]
 
 
 @app.post("/api/webhooks/github-app")
