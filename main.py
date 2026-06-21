@@ -336,8 +336,8 @@ async def re_analyze_project(
     db.commit()
 
     # Delete existing microservices and dependencies so re-analysis writes fresh data
-    db.query(models.Microservice).filter(models.Microservice.project_id == project_id).delete()
     db.query(models.Dependency).filter(models.Dependency.project_id == project_id).delete()
+    db.query(models.Microservice).filter(models.Microservice.project_id == project_id).delete()
     db.commit()
 
     urls = [r.url for r in project.repositories]
