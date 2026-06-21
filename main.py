@@ -209,6 +209,8 @@ async def analysis_callback(project_id: str, payload: CallbackPayload, db: Sessi
                 ),
                 avatar_visual_prompt=ms.get("avatar_prompt"),
                 avatar_image_url=ms.get("avatar_image_url"),
+                avatar_chat_visual_prompt=ms.get("avatar_chat_prompt"),
+                avatar_chat_image_url=ms.get("avatar_chat_image_url"),
                 position_x=ms.get("position", {}).get("x", 0.0),
                 position_y=ms.get("position", {}).get("y", 0.0),
                 scale_tier=ms.get("scale_tier", 3),
@@ -524,6 +526,8 @@ def get_project(
             "repository_id": ms.repository_id,
             "avatar_visual_prompt": ms.avatar_visual_prompt,
             "avatar_image_url": ms.avatar_image_url,
+            "avatar_chat_visual_prompt": ms.avatar_chat_visual_prompt,
+            "avatar_chat_image_url": ms.avatar_chat_image_url,
             "position": {"x": ms.position_x, "y": ms.position_y},
             "scale_tier": ms.scale_tier,
             "technologies": json.loads(ms.technologies) if ms.technologies else []

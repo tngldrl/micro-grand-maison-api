@@ -50,6 +50,8 @@ class Microservice(Base):
     ai_prompt_context = Column(String)
     avatar_visual_prompt = Column(String)
     avatar_image_url = Column(String)
+    avatar_chat_visual_prompt = Column(String, nullable=True)
+    avatar_chat_image_url = Column(String, nullable=True)
     position_x = Column(Float, default=0.0)
     position_y = Column(Float, default=0.0)
     scale_tier = Column(Integer, default=3, nullable=False)
