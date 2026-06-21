@@ -189,6 +189,10 @@ async def analysis_callback(project_id: str, payload: CallbackPayload, db: Sessi
             raw_key_files = ms.get("key_files", [])
             key_files_json = json.dumps(raw_key_files) if raw_key_files else None
 
+            # Serialize technologies for DB storage
+            raw_technologies = ms.get("technologies", [])
+            technologies_json = json.dumps(raw_technologies) if raw_technologies else None
+
             db_ms = models.Microservice(
                 project_id=project.id,
                 repository_id=repository_id,
@@ -209,6 +213,7 @@ async def analysis_callback(project_id: str, payload: CallbackPayload, db: Sessi
                 position_y=ms.get("position", {}).get("y", 0.0),
                 scale_tier=ms.get("scale_tier", 3),
                 key_files=key_files_json,
+                technologies=technologies_json,
             )
             db.add(db_ms)
             db.flush() # To get the db_ms.id
@@ -520,7 +525,8 @@ def get_project(
             "avatar_visual_prompt": ms.avatar_visual_prompt,
             "avatar_image_url": ms.avatar_image_url,
             "position": {"x": ms.position_x, "y": ms.position_y},
-            "scale_tier": ms.scale_tier
+            "scale_tier": ms.scale_tier,
+            "technologies": json.loads(ms.technologies) if ms.technologies else []
         }
         for ms in project.microservices
     ]

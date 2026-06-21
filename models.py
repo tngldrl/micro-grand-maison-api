@@ -56,6 +56,9 @@ class Microservice(Base):
     # JSON string: [{"path": str, "perspective": str, "reason": str}]
     # Populated during analysis (Phase 2), used for chat-time code retrieval
     key_files = Column(String, nullable=True)
+    # JSON string list: ["PostgreSQL", "FastAPI", "Python"]
+    # Populated during analysis, displayed as tags in chat details drawer
+    technologies = Column(String, nullable=True)
 
     project = relationship("Project", back_populates="microservices")
     repository = relationship("Repository", back_populates="microservices")
