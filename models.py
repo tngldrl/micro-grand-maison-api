@@ -24,6 +24,7 @@ class Project(Base):
     repositories = relationship("Repository", back_populates="project", cascade="all, delete-orphan")
     microservices = relationship("Microservice", back_populates="project", cascade="all, delete-orphan")
     dependencies = relationship("Dependency", back_populates="project", cascade="all, delete-orphan")
+    webhook_deliveries = relationship("WebhookDelivery", cascade="all, delete-orphan")
 
 class Repository(Base):
     __tablename__ = "repositories"

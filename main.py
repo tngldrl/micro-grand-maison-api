@@ -709,6 +709,77 @@ def get_project(
         "dependencies": dependencies
     }
 
+
+def delete_gcs_avatars_task(project_id: str, avatar_urls: list[str]):
+    """
+    Background task to delete project avatar images from GCS.
+    """
+    if not GCP_PROJECT_ID:
+        logger.info("GCP_PROJECT_ID not set, skipping GCS avatar deletion")
+        return
+        
+    bucket_name = f"{GCP_PROJECT_ID}-avatars"
+    
+    # Filter valid GCS blob names
+    blob_names = []
+    for url in avatar_urls:
+        if url and "storage.googleapis.com" in url:
+            parts = url.split("/")
+            if len(parts) >= 4:
+                blob_names.append(parts[-1])
+                
+    if not blob_names:
+        logger.info(f"No GCS avatars found to delete for project {project_id}")
+        return
+        
+    try:
+        from google.cloud import storage
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        
+        for blob_name in blob_names:
+            try:
+                blob = bucket.blob(blob_name)
+                blob.delete()
+                logger.info(f"Successfully deleted GCS avatar blob: {blob_name}")
+            except Exception as e:
+                logger.warning(f"Failed to delete GCS blob {blob_name}: {e}")
+    except Exception as e:
+        logger.error(f"Failed to initialize GCS client for deleting avatars of project {project_id}: {e}")
+
+
+@app.delete("/api/projects/{project_id}")
+async def delete_project(
+    project_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    user: dict = Depends(verify_token)
+):
+    project = db.query(models.Project).filter(
+        models.Project.id == project_id,
+        models.Project.user_id == user["uid"]
+    ).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+        
+    # Gather avatar URLs before deletion
+    avatar_urls = []
+    for ms in project.microservices:
+        if ms.avatar_image_url:
+            avatar_urls.append(ms.avatar_image_url)
+        if ms.avatar_chat_image_url:
+            avatar_urls.append(ms.avatar_chat_image_url)
+            
+    # Add GCS delete task to background tasks
+    if avatar_urls:
+        background_tasks.add_task(delete_gcs_avatars_task, project_id, avatar_urls)
+        
+    # Delete project from DB (Cascade deletes repositories, microservices, dependencies, etc.)
+    db.delete(project)
+    db.commit()
+    
+    return {"status": "success", "message": f"Project {project_id} deleted successfully"}
+
 class ChatMessage(BaseModel):
     message: str
 
