@@ -14,7 +14,8 @@ class Project(Base):
     id = Column(String, primary_key=True, default=generate_uuid)
     user_id = Column(String, ForeignKey("users.id"), nullable=True)
     name = Column(String, nullable=True)
-    status = Column(String, default="analyzing") # analyzing, ready, error
+    status = Column(String, default="pending") # pending, analyzing, ready, error, cancelled
+    current_phase = Column(String, nullable=True) # E.g., Cloning repository, Generating avatars
     github_installation_id = Column(String, nullable=True)  # GitHub App installation ID (non-sensitive)
     has_update = Column(Boolean, default=False, nullable=False)  # True when a tracked repo received a push
     is_demo = Column(Boolean, default=False, nullable=False)

@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 import httpx
+import asyncio
 import os
 import json
 import hashlib
@@ -49,6 +50,10 @@ try:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE projects ADD COLUMN is_demo BOOLEAN DEFAULT FALSE"))
                 logger.info("Migrated projects table: added is_demo column")
+        if "current_phase" not in columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE projects ADD COLUMN current_phase VARCHAR"))
+                logger.info("Migrated projects table: added current_phase column")
 except Exception as e:
     logger.error(f"Failed to migrate projects table: {e}")
 
@@ -80,6 +85,84 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+async def queue_worker_loop():
+    from database import SessionLocal
+    import datetime
+    logger.info("Starting background queue worker loop...")
+    while True:
+        await asyncio.sleep(2)
+        db = SessionLocal()
+        try:
+            # Check if any project is currently status="analyzing"
+            running = db.query(models.Project).filter(models.Project.status == "analyzing").first()
+            if running:
+                # Check for 15-minute timeout
+                now = datetime.datetime.utcnow()
+                if running.created_at and (now - running.created_at).total_seconds() > 900:
+                    logger.warning(f"Project {running.id} has been analyzing for over 15 minutes. Marking as error due to timeout.")
+                    running.status = "error"
+                    running.current_phase = "Analysis timed out"
+                    db.commit()
+                continue
+                
+            # Find the oldest pending project
+            is_postgres = db.bind.dialect.name == "postgresql"
+            query = db.query(models.Project).filter(models.Project.status == "pending").order_by(models.Project.created_at.asc())
+            if is_postgres:
+                next_project = query.with_for_update(skip_locked=True).first()
+            else:
+                next_project = query.first()
+                
+            if next_project:
+                next_project.status = "analyzing"
+                next_project.current_phase = "Waiting for analysis to start..."
+                db.commit()
+                
+                logger.info(f"Worker picked up project {next_project.id} for analysis")
+                # Trigger MCP call
+                urls = [r.url.strip() for r in next_project.repositories]
+                asyncio.create_task(run_analysis_task(next_project.id, urls, next_project.github_installation_id))
+        except Exception as e:
+            logger.error(f"Error in queue worker loop: {e}", exc_info=True)
+        finally:
+            db.close()
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(queue_worker_loop())
+
+@app.post("/api/projects/{project_id}/cancel")
+async def cancel_project_analysis(
+    project_id: str,
+    db: Session = Depends(get_db),
+    user: dict = Depends(verify_token)
+):
+    project = db.query(models.Project).filter(
+        models.Project.id == project_id,
+        models.Project.user_id == user["uid"]
+    ).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+        
+    if project.status not in ["pending", "analyzing"]:
+        raise HTTPException(status_code=400, detail=f"Cannot cancel project in status '{project.status}'")
+        
+    old_status = project.status
+    project.status = "cancelled"
+    project.current_phase = "Analysis cancelled by user"
+    db.commit()
+    
+    if old_status == "analyzing":
+        # Request MCP server to cancel
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(f"{MCP_URL}/cancel", json={"project_id": project_id})
+                resp.raise_for_status()
+        except Exception as e:
+            logger.error(f"Failed to propagate cancellation to MCP for project {project_id}: {e}")
+            
+    return {"project_id": project_id, "status": "cancelled"}
 
 def find_all_repositories_by_url(db: Session, url: str, project_id: Optional[str] = None) -> List[models.Repository]:
     """
@@ -295,18 +378,28 @@ async def run_analysis_task(
 class CallbackPayload(BaseModel):
     project_id: str
     status: str
-    data: dict = None
-    error: str = None
+    data: Optional[dict] = None
+    error: Optional[str] = None
+    progress_message: Optional[str] = None
 
 @app.post("/api/projects/{project_id}/callback")
 async def analysis_callback(project_id: str, payload: CallbackPayload, db: Session = Depends(get_db)):
     project = db.query(models.Project).filter(models.Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+
+    if project.status == "cancelled":
+        return {"status": "cancelled_ignored"}
+
+    if payload.status == "progress":
+        project.current_phase = payload.progress_message
+        db.commit()
+        return {"status": "progress_updated"}
         
     if payload.status == "error":
         print(f"Analysis callback reported error for project {project_id}: {payload.error}")
         project.status = "error"
+        project.current_phase = f"Error: {payload.error}"
         db.commit()
         return {"status": "error_recorded"}
         
@@ -436,7 +529,8 @@ async def start_analysis(
             )
 
     project = models.Project(
-        status="analyzing",
+        status="pending",
+        current_phase="Waiting in queue...",
         name=req.project_name,
         user_id=user["uid"],
         github_installation_id=req.github_installation_id,
@@ -459,20 +553,12 @@ async def start_analysis(
         urls.append(r.url.strip())
     db.commit()
 
-    background_tasks.add_task(
-        run_analysis_task,
-        project.id,
-        urls,
-        req.github_installation_id,
-    )
-
     return {"project_id": project.id, "status": project.status}
 
 
 @app.post("/api/projects/{project_id}/re-analyze")
 async def re_analyze_project(
     project_id: str,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     user: dict = Depends(verify_token),
 ):
@@ -488,11 +574,12 @@ async def re_analyze_project(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    if project.status == "analyzing":
-        raise HTTPException(status_code=409, detail="Project is already being analyzed")
+    if project.status in ["pending", "analyzing"]:
+        raise HTTPException(status_code=409, detail="Project is already queued or being analyzed")
 
     # Reset has_update immediately (idempotent – another push can set it back to True)
-    project.status = "analyzing"
+    project.status = "pending"
+    project.current_phase = "Waiting in queue..."
     project.has_update = False
     db.commit()
 
@@ -501,15 +588,7 @@ async def re_analyze_project(
     db.query(models.Microservice).filter(models.Microservice.project_id == project_id).delete()
     db.commit()
 
-    urls = [r.url for r in project.repositories]
-    background_tasks.add_task(
-        run_analysis_task,
-        project.id,
-        urls,
-        project.github_installation_id,
-    )
-
-    return {"project_id": project.id, "status": "analyzing"}
+    return {"project_id": project.id, "status": "pending"}
 
 
 @app.get("/api/github-app/install-url")
@@ -662,7 +741,7 @@ def get_project(
         raise HTTPException(status_code=404, detail="Project not found")
         
     if project.status != "ready":
-        return {"id": project.id, "name": project.name, "status": project.status}
+        return {"id": project.id, "name": project.name, "status": project.status, "current_phase": project.current_phase}
         
     repositories = [
         {
