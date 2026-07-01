@@ -742,7 +742,14 @@ def list_projects(
             "status": proj.status,
             "has_update": proj.has_update,
             "is_demo": proj.is_demo,
-            "created_at": proj.created_at.isoformat() if proj.created_at else None
+            "created_at": proj.created_at.isoformat() if proj.created_at else None,
+            "repositories": [
+                {
+                    "id": repo.id,
+                    "url": repo.url
+                }
+                for repo in proj.repositories
+            ]
         }
         for proj in projects
     ]
