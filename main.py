@@ -68,7 +68,7 @@ try:
 except Exception as e:
     logger.error(f"Failed to migrate users table: {e}")
 
-app = FastAPI(title="Architecture World API")
+app = FastAPI(title="Micro Grand Maison API")
 
 allowed_origins = [
     "http://localhost:3000",
