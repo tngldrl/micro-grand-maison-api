@@ -73,6 +73,7 @@ app = FastAPI(title="Micro Grand Maison API")
 allowed_origins = [
     "http://localhost:3000",
     "https://architecture-world-web-ulti3dddka-an.a.run.app",
+    "https://web.micro-grandmaison.com"
 ]
 allowed_origins_env = os.environ.get("ALLOWED_ORIGINS")
 if allowed_origins_env:
