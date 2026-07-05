@@ -809,6 +809,7 @@ def list_projects(
             "status": proj.status,
             "has_update": proj.has_update,
             "is_demo": proj.is_demo,
+            "user_id": proj.user_id,
             "created_at": proj.created_at.isoformat() if proj.created_at else None,
             "repositories": [
                 {
