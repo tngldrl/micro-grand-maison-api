@@ -532,6 +532,72 @@ async def start_analysis(
                 detail=f"watch_branch is required when webhook_enabled=true (url: {r.url})"
             )
 
+        url = r.url.strip()
+        # Validate that the URL does not contain branch/tree directories (must be default branch root)
+        if "/tree/" in url or "/blob/" in url:
+            raise HTTPException(
+                status_code=400,
+                detail=f"リポジトリURLはデフォルトブランチのトップレベル（ルート）である必要があります（/tree/ や /blob/ を含めないでください）: {url}"
+            )
+
+        # Enforce HTTPS format only (reject SSH format git@github.com)
+        if not url.startswith("https://github.com/"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"無効なURL形式です。https://github.com/から始まるHTTPS形式のURLを指定してください: {url}"
+            )
+
+        # Verify parsing and extract owner/repo
+        try:
+            owner, repo_name = parse_github_repo_url(url)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"無効なGitHubリポジトリURLです: {url}"
+            )
+
+        # Check repository existence and access permissions remotely
+        has_access = False
+        if req.github_installation_id:
+            try:
+                iat = get_installation_access_token(req.github_installation_id)
+                headers = {
+                    "Authorization": f"Bearer {iat}",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                }
+                api_url = f"https://api.github.com/repos/{owner}/{repo_name}"
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    resp = await client.get(api_url, headers=headers)
+                    if resp.status_code == 200:
+                        has_access = True
+            except Exception as e:
+                logger.warning("Failed checking repo access using installation token %s: %s", req.github_installation_id, e)
+
+        if not has_access:
+            try:
+                github_token = os.environ.get("GITHUB_PUBLIC_TOKEN", "")
+                headers = {
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                }
+                if github_token:
+                    headers["Authorization"] = f"token {github_token}"
+                
+                api_url = f"https://api.github.com/repos/{owner}/{repo_name}"
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    resp = await client.get(api_url, headers=headers)
+                    if resp.status_code == 200:
+                        has_access = True
+            except Exception as e:
+                logger.warning("Failed checking public repo access for %s/%s: %s", owner, repo_name, e)
+
+        if not has_access:
+            raise HTTPException(
+                status_code=400,
+                detail=f"指定されたリポジトリが存在しないか、アクセス権限がありません: {url}"
+            )
+
     project = models.Project(
         status="pending",
         current_phase="Waiting in queue...",
@@ -908,6 +974,9 @@ async def send_chat_message(
     db: Session = Depends(get_db),
     user: dict = Depends(verify_token)
 ):
+    if req.message and len(req.message) > 500:
+        raise HTTPException(status_code=400, detail="メッセージは最大500文字までです。")
+
     ms = db.query(models.Microservice).filter(models.Microservice.id == ms_id).first()
     if not ms:
         raise HTTPException(status_code=404, detail="Microservice not found")

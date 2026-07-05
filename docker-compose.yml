@@ -3,11 +3,11 @@ version: '3.8'
 services:
   db:
     image: postgres:15
-    container_name: architecture-world-db
+    container_name: micro-grand-maison-db
     environment:
       POSTGRES_USER: user
       POSTGRES_PASSWORD: password
-      POSTGRES_DB: architecture_world
+      POSTGRES_DB: micro-grand-maison
     ports:
       - "5432:5432"
     volumes:
