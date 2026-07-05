@@ -19,6 +19,7 @@ class Project(Base):
     github_installation_id = Column(String, nullable=True)  # GitHub App installation ID (non-sensitive)
     has_update = Column(Boolean, default=False, nullable=False)  # True when a tracked repo received a push
     is_demo = Column(Boolean, default=False, nullable=False)
+    copyrights_description = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="projects")

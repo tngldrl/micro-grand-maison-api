@@ -54,6 +54,10 @@ try:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE projects ADD COLUMN current_phase VARCHAR"))
                 logger.info("Migrated projects table: added current_phase column")
+        if "copyrights_description" not in columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE projects ADD COLUMN copyrights_description VARCHAR"))
+                logger.info("Migrated projects table: added copyrights_description column")
 except Exception as e:
     logger.error(f"Failed to migrate projects table: {e}")
 
@@ -331,6 +335,7 @@ class AnalyzeRequest(BaseModel):
     project_name: Optional[str] = None
     github_installation_id: Optional[str] = None  # From GitHub App callback
     is_demo: bool = False
+    copyrights_description: Optional[str] = None
 
 class CheckAccessRequest(BaseModel):
     url: str
@@ -605,6 +610,7 @@ async def start_analysis(
         user_id=user["uid"],
         github_installation_id=req.github_installation_id,
         is_demo=req.is_demo,
+        copyrights_description=req.copyrights_description,
     )
     db.add(project)
     db.commit()
@@ -810,6 +816,7 @@ def list_projects(
             "has_update": proj.has_update,
             "is_demo": proj.is_demo,
             "user_id": proj.user_id,
+            "copyrights_description": proj.copyrights_description,
             "created_at": proj.created_at.isoformat() if proj.created_at else None,
             "repositories": [
                 {
@@ -833,7 +840,13 @@ def get_project(
         raise HTTPException(status_code=404, detail="Project not found")
         
     if project.status != "ready":
-        return {"id": project.id, "name": project.name, "status": project.status, "current_phase": project.current_phase}
+        return {
+            "id": project.id, 
+            "name": project.name, 
+            "status": project.status, 
+            "current_phase": project.current_phase,
+            "copyrights_description": project.copyrights_description,
+        }
         
     repositories = [
         {
@@ -875,6 +888,7 @@ def get_project(
         "name": project.name,
         "status": project.status,
         "has_update": project.has_update,
+        "copyrights_description": project.copyrights_description,
         "repositories": repositories,
         "microservices": microservices,
         "dependencies": dependencies
