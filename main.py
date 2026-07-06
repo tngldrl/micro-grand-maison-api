@@ -32,6 +32,23 @@ GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "")
 VERTEX_AI_LOCATION = os.environ.get("VERTEX_AI_LOCATION", "us-central1")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
 
+def get_google_id_token(audience: str) -> Optional[str]:
+    """
+    Fetch a Google ID token for the specified audience when running on GCP Cloud Run.
+    Returns None if running locally or if fetching fails.
+    """
+    if "localhost" in audience or "127.0.0.1" in audience or not audience.startswith("https"):
+        return None
+    try:
+        import google.auth.transport.requests
+        import google.oauth2.id_token
+        auth_req = google.auth.transport.requests.Request()
+        token = google.oauth2.id_token.fetch_id_token(auth_req, audience)
+        return token
+    except Exception as e:
+        logger.debug(f"Could not fetch GCP ID token for audience {audience}: {e}")
+        return None
+
 # Max hops for agentic code retrieval during chat
 MAX_RETRIEVAL_HOPS = 3
 # Max additional files to fetch per hop
@@ -162,7 +179,15 @@ async def cancel_project_analysis(
         # Request MCP server to cancel
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(f"{MCP_URL}/cancel", json={"project_id": project_id})
+                headers = {}
+                g_token = get_google_id_token(MCP_URL)
+                if g_token:
+                    headers["Authorization"] = f"Bearer {g_token}"
+                resp = await client.post(
+                    f"{MCP_URL}/cancel",
+                    json={"project_id": project_id},
+                    headers=headers
+                )
                 resp.raise_for_status()
         except Exception as e:
             logger.error(f"Failed to propagate cancellation to MCP for project {project_id}: {e}")
@@ -361,6 +386,10 @@ async def run_analysis_task(
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
+            headers = {}
+            g_token = get_google_id_token(MCP_URL)
+            if g_token:
+                headers["Authorization"] = f"Bearer {g_token}"
             response = await client.post(
                 f"{MCP_URL}/analyze",
                 json={
@@ -368,7 +397,8 @@ async def run_analysis_task(
                     "project_id": project_id,
                     "callback_url": callback_url,
                     "github_installation_access_token": iat,
-                }
+                },
+                headers=headers
             )
             response.raise_for_status()
     except Exception as e:
@@ -1036,11 +1066,19 @@ async def send_chat_message(
     # Call MCP
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(f"{MCP_URL}/chat", json={
-                "system_prompt": enriched_system_prompt,
-                "history": history,
-                "new_message": req.message,
-            })
+            headers = {}
+            g_token = get_google_id_token(MCP_URL)
+            if g_token:
+                headers["Authorization"] = f"Bearer {g_token}"
+            response = await client.post(
+                f"{MCP_URL}/chat",
+                json={
+                    "system_prompt": enriched_system_prompt,
+                    "history": history,
+                    "new_message": req.message,
+                },
+                headers=headers
+            )
             response.raise_for_status()
             data = response.json()
             reply = data.get("response", "I'm sorry, I couldn't process that.")
@@ -1200,9 +1238,14 @@ If no more files are needed: {{"additional_files": []}}
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
+            headers = {}
+            g_token = get_google_id_token(MCP_URL)
+            if g_token:
+                headers["Authorization"] = f"Bearer {g_token}"
             resp = await client.post(
                 f"{MCP_URL}/identify-files",
                 json={"prompt": prompt, "project_id": GCP_PROJECT_ID},
+                headers=headers
             )
             if resp.status_code == 200:
                 data = resp.json()
@@ -1450,4 +1493,4 @@ def list_webhook_deliveries(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=False)
