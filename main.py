@@ -279,6 +279,22 @@ def verify_admin_session_token(token: str) -> bool:
     except Exception:
         return False
 
+def verify_admin_token(authorization: Optional[str] = Header(None)) -> bool:
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing authorization header")
+    try:
+        parts = authorization.split(" ")
+        if len(parts) != 2 or parts[0].lower() != "bearer":
+            raise HTTPException(status_code=401, detail="Invalid authorization header format")
+        token = parts[1]
+        if not verify_admin_session_token(token):
+            raise HTTPException(status_code=401, detail="Invalid admin session token")
+        return True
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid admin credentials")
+
 def sha256_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -344,6 +360,85 @@ async def verify_admin(req: AdminVerifyRequest):
     # Success: Issue token
     token = generate_admin_session_token()
     return {"token": token, "expires_in": 1800}
+
+
+@app.get("/api/admin/users-projects")
+async def get_admin_users_projects(
+    db: Session = Depends(get_db),
+    admin_verified: bool = Depends(verify_admin_token)
+):
+    users = db.query(models.User).order_by(models.User.created_at.desc()).all()
+    result = []
+    for u in users:
+        proj_list = []
+        for p in u.projects:
+            proj_list.append({
+                "id": p.id,
+                "name": p.name,
+                "status": p.status,
+                "has_update": p.has_update,
+                "created_at": p.created_at.isoformat() if p.created_at else None
+            })
+        result.append({
+            "uid": u.id,
+            "email": u.email,
+            "display_name": u.display_name,
+            "github_username": u.github_username,
+            "created_at": u.created_at.isoformat() if u.created_at else None,
+            "projects": proj_list
+        })
+    return {"status": "success", "data": {"users": result}}
+
+
+@app.delete("/api/admin/projects/{project_id}")
+async def delete_admin_project(
+    project_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    admin_verified: bool = Depends(verify_admin_token)
+):
+    project = db.query(models.Project).filter(models.Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    avatar_urls = []
+    for ms in project.microservices:
+        if ms.avatar_image_url:
+            avatar_urls.append(ms.avatar_image_url)
+        if ms.avatar_chat_image_url:
+            avatar_urls.append(ms.avatar_chat_image_url)
+
+    if avatar_urls:
+        background_tasks.add_task(delete_gcs_avatars_task, project_id, avatar_urls)
+
+    db.delete(project)
+    db.commit()
+    return {"status": "success", "message": "Project deleted successfully"}
+
+
+@app.post("/api/admin/projects/{project_id}/reanalyze")
+async def admin_reanalyze_project(
+    project_id: str,
+    db: Session = Depends(get_db),
+    admin_verified: bool = Depends(verify_admin_token)
+):
+    project = db.query(models.Project).filter(models.Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if project.status in ["pending", "analyzing"]:
+        raise HTTPException(status_code=409, detail="Project is already queued or being analyzed")
+
+    project.status = "pending"
+    project.current_phase = "Waiting in queue..."
+    project.has_update = False
+    db.commit()
+
+    db.query(models.Dependency).filter(models.Dependency.project_id == project_id).delete()
+    db.query(models.Microservice).filter(models.Microservice.project_id == project_id).delete()
+    db.commit()
+
+    return {"project_id": project.id, "status": "pending"}
 
 
 MCP_URL = os.environ.get("MCP_URL", "http://localhost:8001")
