@@ -654,14 +654,8 @@ async def start_analysis(
     if not repo_inputs:
         raise HTTPException(status_code=400, detail="No URLs provided")
 
-    # Validate: webhook_enabled=True requires watch_branch
+    # Validate URLs format and repository rules
     for r in repo_inputs:
-        if r.webhook_enabled and not r.watch_branch:
-            raise HTTPException(
-                status_code=400,
-                detail=f"watch_branch is required when webhook_enabled=true (url: {r.url})"
-            )
-
         url = r.url.strip()
         # Validate that the URL does not contain branch/tree directories (must be default branch root)
         if "/tree/" in url or "/blob/" in url:
@@ -1472,13 +1466,14 @@ async def github_app_webhook(
     if event_type == "push":
         installation_id = str(payload.get("installation", {}).get("id", ""))
         repo_url = payload.get("repository", {}).get("clone_url", "")
+        default_branch = payload.get("repository", {}).get("default_branch", "main")
         ref = payload.get("ref", "")  # e.g. "refs/heads/main"
         pushed_branch = ref.removeprefix("refs/heads/") if ref.startswith("refs/heads/") else ref
         commit_sha = payload.get("after", None)  # HEAD commit SHA after push
 
         logger.info(
-            "Push event received: repo_url=%s, ref=%s, commit_sha=%s, installation_id=%s",
-            repo_url, ref, commit_sha, installation_id
+            "Push event received: repo_url=%s, ref=%s, default_branch=%s, commit_sha=%s, installation_id=%s",
+            repo_url, ref, default_branch, commit_sha, installation_id
         )
 
         if not repo_url:
@@ -1503,11 +1498,10 @@ async def github_app_webhook(
             if installation_id and not target_project.github_installation_id:
                 target_project.github_installation_id = installation_id
 
-            # Branch filtering: only act if webhook is enabled and branch matches
+            # Branch filtering: only act if webhook is enabled and branch matches default_branch
             matched = (
                 db_repo.webhook_enabled
-                and bool(db_repo.watch_branch)
-                and pushed_branch == db_repo.watch_branch
+                and pushed_branch == default_branch
             )
 
             # Always record the delivery for audit/news-feed purposes
@@ -1524,11 +1518,11 @@ async def github_app_webhook(
                 target_project.has_update = True
                 updated_projects.append(target_project.id)
                 logger.info(
-                    "push matched watch_branch '%s' for project %s – has_update set to True",
+                    "push matched default_branch '%s' for project %s – has_update set to True",
                     pushed_branch, target_project.id,
                 )
             else:
-                reason = "webhook_disabled" if not db_repo.webhook_enabled else f"branch '{pushed_branch}' != watch_branch '{db_repo.watch_branch}'"
+                reason = "webhook_disabled" if not db_repo.webhook_enabled else f"branch '{pushed_branch}' != default_branch '{default_branch}'"
                 ignored_reasons.append(f"project {target_project.id}: {reason}")
 
         db.commit()
