@@ -709,6 +709,14 @@ async def start_analysis(
     if not repo_inputs:
         raise HTTPException(status_code=400, detail="No URLs provided")
 
+    # Validate: if webhook is enabled for any repo, github_installation_id is mandatory
+    any_webhook = any(r.webhook_enabled for r in repo_inputs)
+    if any_webhook and not req.github_installation_id:
+        raise HTTPException(
+            status_code=400,
+            detail="github_installation_id is required when webhook notifications are enabled."
+        )
+
     # Validate URLs format and repository rules
     for r in repo_inputs:
         url = r.url.strip()
@@ -919,7 +927,9 @@ async def check_github_app_access(
         models.Project.github_installation_id.isnot(None),
     ).all()
 
-    installation_ids = list(set([p.github_installation_id for p in user_projects if p.github_installation_id]))
+    raw_ids = list(set([p.github_installation_id for p in user_projects if p.github_installation_id]))
+    # Filter the list using verify_installation_ownership to prevent unowned installations from leaking access
+    installation_ids = [inst_id for inst_id in raw_ids if verify_installation_ownership(db, user["uid"], inst_id)]
 
     # Append request-provided installation_id if present and owned by user
     if body.installation_id:
@@ -1568,18 +1578,13 @@ async def github_app_webhook(
                 continue
 
             # Verify if this project is authorized to receive push notifications from this installation_id.
-            # If the project's installation ID is not set yet, we allow associating it on first push.
-            # Otherwise, it must match the Webhook's installation_id exactly.
-            if target_project.github_installation_id and target_project.github_installation_id != installation_id:
+            # The project's registered github_installation_id MUST be set and MUST match the Webhook's installation_id exactly.
+            if not target_project.github_installation_id or target_project.github_installation_id != installation_id:
                 logger.warning(
-                    "Push event ignored: Webhook installation ID mismatch for project %s (project: %s, webhook: %s)",
+                    "Push event ignored: Webhook installation ID mismatch or missing for project %s (project: %s, webhook: %s)",
                     target_project.id, target_project.github_installation_id, installation_id
                 )
                 continue
-
-            # Update installation_id if we now have it from the push event
-            if installation_id and not target_project.github_installation_id:
-                target_project.github_installation_id = installation_id
 
             # Branch filtering: only act if webhook is enabled and branch matches default_branch
             matched = (
