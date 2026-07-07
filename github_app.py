@@ -198,3 +198,30 @@ def build_authenticated_clone_url(repo_url: str, iat: str) -> str:
     repo_url = re.sub(r"^git@github\.com:", "https://github.com/", repo_url)
     repo_url = repo_url if repo_url.endswith(".git") else repo_url + ".git"
     return repo_url.replace("https://", f"https://x-access-token:{iat}@")
+
+
+def get_installation_metadata(installation_id: Union[str, int]) -> dict:
+    """
+    Fetch GitHub App installation metadata using the App JWT.
+    Returns the JSON payload from GET /app/installations/{installation_id}
+    """
+    app_jwt = _generate_app_jwt()
+    url = f"{GITHUB_API_BASE}/app/installations/{installation_id}"
+
+    with httpx.Client(timeout=10.0) as client:
+        resp = client.get(
+            url,
+            headers={
+                "Authorization": f"Bearer {app_jwt}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        )
+
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"Failed to get installation metadata for {installation_id}: "
+            f"HTTP {resp.status_code} – {resp.text}"
+        )
+
+    return resp.json()

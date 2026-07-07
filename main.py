@@ -22,6 +22,7 @@ from github_app import (
     get_github_file_content,
     parse_github_repo_url,
     build_authenticated_clone_url,
+    get_installation_metadata,
 )
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,60 @@ GITHUB_APP_INSTALL_URL = os.environ.get("GITHUB_APP_INSTALL_URL", "")
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "")
 VERTEX_AI_LOCATION = os.environ.get("VERTEX_AI_LOCATION", "us-central1")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
+
+
+def verify_installation_ownership(db: Session, user_uid: str, installation_id: str) -> bool:
+    """
+    Verifies if the given installation_id belongs to the logged-in user's GitHub account
+    or an organization they belong to.
+    """
+    db_user = db.query(models.User).filter(models.User.id == user_uid).first()
+    if not db_user or not db_user.github_username:
+        logger.warning("Ownership verification failed: User not found or has no github_username (UID: %s)", user_uid)
+        return False
+
+    github_username = db_user.github_username.strip()
+
+    try:
+        # 1. Fetch metadata using App JWT
+        metadata = get_installation_metadata(installation_id)
+        account = metadata.get("account", {})
+        account_login = account.get("login", "")
+        account_type = account.get("type", "")
+
+        if not account_login:
+            return False
+
+        # 2. Check if it's the user's personal account
+        if account_type == "User":
+            return account_login.lower() == github_username.lower()
+
+        # 3. Check if it's an Organization and the user is a member
+        if account_type == "Organization":
+            # Call GitHub API to check membership using installation access token
+            iat = get_installation_access_token(installation_id)
+            headers = {
+                "Authorization": f"Bearer {iat}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }
+            api_url = f"https://api.github.com/orgs/{account_login}/members/{github_username}"
+            with httpx.Client(timeout=5.0) as client:
+                resp = client.get(api_url, headers=headers)
+                if resp.status_code == 204:
+                    return True
+                logger.warning(
+                    "User %s is not a member of organization %s (status: %s)",
+                    github_username, account_login, resp.status_code
+                )
+                return False
+
+    except Exception as e:
+        logger.error("Failed to verify installation ownership for installation %s: %s", installation_id, e)
+        return False
+
+    return False
+
 
 def get_google_id_token(audience: str) -> Optional[str]:
     """
@@ -683,6 +738,11 @@ async def start_analysis(
         # Check repository existence and access permissions remotely
         has_access = False
         if req.github_installation_id:
+            if not verify_installation_ownership(db, user["uid"], req.github_installation_id):
+                raise HTTPException(
+                    status_code=403,
+                    detail="You do not have permission to use this installation_id or it does not belong to you."
+                )
             try:
                 iat = get_installation_access_token(req.github_installation_id)
                 headers = {
@@ -815,6 +875,13 @@ async def save_github_app_installation(
     if not installation_id:
         raise HTTPException(status_code=400, detail="installation_id is required")
 
+    # Strictly verify that the installation belongs to the requesting user
+    if not verify_installation_ownership(db, user["uid"], installation_id):
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have permission to use this installation_id or it does not belong to you."
+        )
+
     if project_id:
         project = db.query(models.Project).filter(
             models.Project.id == project_id,
@@ -854,10 +921,16 @@ async def check_github_app_access(
 
     installation_ids = list(set([p.github_installation_id for p in user_projects if p.github_installation_id]))
 
-    # Append request-provided installation_id if present (e.g. from redirect before project is saved)
+    # Append request-provided installation_id if present and owned by user
     if body.installation_id:
-        installation_ids.append(body.installation_id)
-        installation_ids = list(set(installation_ids))
+        if verify_installation_ownership(db, user["uid"], body.installation_id):
+            installation_ids.append(body.installation_id)
+            installation_ids = list(set(installation_ids))
+        else:
+            logger.warning(
+                "User %s attempted check-access on installation %s which they do not own",
+                user["uid"], body.installation_id
+            )
 
     if not installation_ids:
         return {"has_access": False}
@@ -1492,6 +1565,16 @@ async def github_app_webhook(
             target_project = db_repo.project
             if not target_project:
                 logger.warning("Push event ignored: project not found for repository ID %s", db_repo.id)
+                continue
+
+            # Verify if this project is authorized to receive push notifications from this installation_id.
+            # If the project's installation ID is not set yet, we allow associating it on first push.
+            # Otherwise, it must match the Webhook's installation_id exactly.
+            if target_project.github_installation_id and target_project.github_installation_id != installation_id:
+                logger.warning(
+                    "Push event ignored: Webhook installation ID mismatch for project %s (project: %s, webhook: %s)",
+                    target_project.id, target_project.github_installation_id, installation_id
+                )
                 continue
 
             # Update installation_id if we now have it from the push event
