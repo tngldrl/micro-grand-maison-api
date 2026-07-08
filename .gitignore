@@ -3,3 +3,4 @@
 __pycache__
 .env
 *.private-key.pem
+.DS_Store
