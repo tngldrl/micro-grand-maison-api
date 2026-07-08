@@ -87,10 +87,12 @@ class ChatHistory(Base):
     
     id = Column(String, primary_key=True, default=generate_uuid)
     microservice_id = Column(String, ForeignKey("microservices.id"))
+    user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
     messages = Column(String, default="[]") # JSON stringified list of messages
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     microservice = relationship("Microservice", back_populates="chat_histories")
+    user = relationship("User", back_populates="chat_histories")
 
 class User(Base):
     __tablename__ = "users"
@@ -102,6 +104,7 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     projects = relationship("Project", back_populates="user", cascade="all, delete-orphan")
+    chat_histories = relationship("ChatHistory", back_populates="user", cascade="all, delete-orphan")
 
 
 class WebhookDelivery(Base):

@@ -144,6 +144,25 @@ try:
 except Exception as e:
     logger.error(f"Failed to migrate users table: {e}")
 
+try:
+    inspector = inspect(engine)
+    if "chat_histories" in inspector.get_table_names():
+        columns = [col["name"] for col in inspector.get_columns("chat_histories")]
+        if "user_id" not in columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE chat_histories ADD COLUMN user_id VARCHAR"))
+                logger.info("Migrated chat_histories table: added user_id column")
+except Exception as e:
+    logger.error(f"Failed to migrate chat_histories table: {e}")
+
+# Purge legacy chat histories for privacy compliance on database migrations
+try:
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM chat_histories"))
+        logger.info("Database migration: Purged legacy ChatHistory records for privacy enforcement.")
+except Exception as e:
+    logger.error(f"Failed to purge ChatHistory records: {e}")
+
 app = FastAPI(title="Micro Grand Maison API")
 
 allowed_origins = [
@@ -1169,6 +1188,7 @@ async def delete_project(
 
 class ChatMessage(BaseModel):
     message: str
+    history: Optional[List[Dict[str, str]]] = None
 
 @app.get("/api/microservices/{ms_id}/chat")
 def get_chat_history(
@@ -1180,7 +1200,15 @@ def get_chat_history(
     if not ms:
         raise HTTPException(status_code=404, detail="Microservice not found")
         
-    chat = db.query(models.ChatHistory).filter(models.ChatHistory.microservice_id == ms.id).first()
+    # If the user is a guest (anonymous), return an empty history.
+    # Guest histories are managed purely in frontend memory.
+    if user.get("is_anonymous") or user.get("uid") == "guest":
+        return {"messages": []}
+
+    chat = db.query(models.ChatHistory).filter(
+        models.ChatHistory.microservice_id == ms.id,
+        models.ChatHistory.user_id == user["uid"]
+    ).first()
     messages = json.loads(chat.messages) if chat else []
     return {"messages": messages}
 
@@ -1198,14 +1226,27 @@ async def send_chat_message(
     if not ms:
         raise HTTPException(status_code=404, detail="Microservice not found")
 
-    chat = db.query(models.ChatHistory).filter(models.ChatHistory.microservice_id == ms.id).first()
-    if not chat:
-        chat = models.ChatHistory(microservice_id=ms.id, messages="[]")
-        db.add(chat)
-        db.commit()
-        db.refresh(chat)
+    is_guest = user.get("is_anonymous") or user.get("uid") == "guest"
 
-    history = json.loads(chat.messages)
+    if is_guest:
+        # Load temporary history from client, skip DB operations
+        history = req.history if req.history is not None else []
+        chat = None
+    else:
+        chat = db.query(models.ChatHistory).filter(
+            models.ChatHistory.microservice_id == ms.id,
+            models.ChatHistory.user_id == user["uid"]
+        ).first()
+        if not chat:
+            chat = models.ChatHistory(
+                microservice_id=ms.id,
+                user_id=user["uid"],
+                messages="[]"
+            )
+            db.add(chat)
+            db.commit()
+            db.refresh(chat)
+        history = json.loads(chat.messages)
 
     # -----------------------------------------------------------------------
     # Agentic code retrieval: fetch source code from GitHub and inject into
@@ -1261,8 +1302,9 @@ async def send_chat_message(
     history.append({"role": "user", "content": req.message})
     history.append({"role": "model", "content": reply})
 
-    chat.messages = json.dumps(history)
-    db.commit()
+    if not is_guest and chat:
+        chat.messages = json.dumps(history)
+        db.commit()
 
     return {"reply": reply, "messages": history}
 
