@@ -130,6 +130,12 @@ try:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE projects ADD COLUMN copyrights_description VARCHAR"))
                 logger.info("Migrated projects table: added copyrights_description column")
+        if "updated_at" not in columns:
+            with engine.begin() as conn:
+                is_postgres = conn.dialect.name == "postgresql"
+                col_type = "TIMESTAMP" if is_postgres else "DATETIME"
+                conn.execute(text(f"ALTER TABLE projects ADD COLUMN updated_at {col_type}"))
+                logger.info("Migrated projects table: added updated_at column")
 except Exception as e:
     logger.error(f"Failed to migrate projects table: {e}")
 
@@ -195,7 +201,8 @@ async def queue_worker_loop():
             if running:
                 # Check for 15-minute timeout
                 now = datetime.datetime.utcnow()
-                if running.created_at and (now - running.created_at).total_seconds() > 900:
+                ref_time = running.updated_at or running.created_at
+                if ref_time and (now - ref_time).total_seconds() > 900:
                     logger.warning(f"Project {running.id} has been analyzing for over 15 minutes. Marking as error due to timeout.")
                     running.status = "error"
                     running.current_phase = "Analysis timed out"

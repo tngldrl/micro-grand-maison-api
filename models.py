@@ -21,6 +21,7 @@ class Project(Base):
     is_demo = Column(Boolean, default=False, nullable=False)
     copyrights_description = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     user = relationship("User", back_populates="projects")
     repositories = relationship("Repository", back_populates="project", cascade="all, delete-orphan")
