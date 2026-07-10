@@ -1265,7 +1265,7 @@ async def send_chat_message(
         code_context = await _retrieve_code_context(ms, project, req.message)
         if code_context:
             code_section = "\n\n".join(
-                f"### {path}\n```\n{content[:4000]}\n```"  # truncate very large files
+                f"### {path}\n```\n{content[:102400]}\n```"  # truncate very large files
                 for path, content in code_context.items()
             )
             enriched_system_prompt = (
@@ -1432,7 +1432,7 @@ async def _identify_additional_files(
         f"- {path} ({len(content)} chars)" for path, content in fetched.items()
     )
     fetched_snippets = "\n\n".join(
-        f"=== {path} ===\n{content[:1500]}"  # show first 1500 chars per file
+        f"=== {path} ===\n{content[:50000]}"  # show first 50000 chars per file
         for path, content in fetched.items()
     )
 
