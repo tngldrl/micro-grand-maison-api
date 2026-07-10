@@ -105,9 +105,9 @@ def get_google_id_token(audience: str) -> Optional[str]:
         return None
 
 # Max hops for agentic code retrieval during chat
-MAX_RETRIEVAL_HOPS = 3
+MAX_RETRIEVAL_HOPS = 6
 # Max additional files to fetch per hop
-MAX_FILES_PER_HOP = 3
+MAX_FILES_PER_HOP = 6
 
 # Create tables
 Base.metadata.create_all(bind=engine)
